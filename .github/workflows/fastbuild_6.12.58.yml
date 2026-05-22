@@ -134,9 +134,9 @@ jobs:
           rm -f ./ccache &
           
           echo "正在克隆源码仓库..."
-          aria2c -s16 -x16 -k1M https://github.com/cctv18/android_kernel_common_oneplus_sm8850/archive/refs/heads/oneplus/sm8850_v_16.0.0_oneplus_15.zip -o common.zip && 
+          aria2c -s16 -x16 -k1M https://github.com/310DSD/android_kernel_common_oneplus_sm8850/archive/refs/heads/oneplus/sm8850_b_16.0_pad_3_pro.zip -o common.zip && 
           unzip -q common.zip && 
-          mv "android_kernel_common_oneplus_sm8850-oneplus-sm8850_v_16.0.0_oneplus_15" common &&
+          mv "android_kernel_common_oneplus_sm8850-oneplus-sm8850_b_16.0.0_pad_3_pro" common &&
           rm -rf common.zip &
           
           echo "正在克隆llvm-clang19工具链..." &&
