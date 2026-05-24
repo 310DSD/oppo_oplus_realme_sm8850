@@ -648,6 +648,7 @@ jobs:
           KCFLAGS+=" -O2"
           KCFLAGS+=" -pipe"
           KCFLAGS+=" -Wno-error"
+          KCFLAGS+=" -Wno-unused-command-line-argument"
           KCFLAGS+=" -fno-stack-protector"
           KCFLAGS+=" -D__ANDROID_COMMON_KERNEL__"
           export KCFLAGS
