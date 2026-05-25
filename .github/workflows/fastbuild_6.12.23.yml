@@ -720,19 +720,16 @@ jobs:
 
       - name: 独立编译最新版 LZ4 内核模块 (LKM)
         run: |
-          echo "正在获取 LZ4 源码及包装层..."
+          echo "正在获取 LZ4 最新官方源码..."
           cd kernel_workspace
           mkdir -p lz4_mod
           cd lz4_mod
           
-          # 1. 获取官方最新算法及 310DSD 仓库的 main.c
+          # 1. 仅拉取 GitHub 官方最新且绝对稳定的核心算法文件
           aria2c -s4 -x4 https://raw.githubusercontent.com/lz4/lz4/dev/lib/lz4.c -o lz4_core.c
           aria2c -s4 -x4 https://raw.githubusercontent.com/lz4/lz4/dev/lib/lz4.h -o lz4.h
-          aria2c -s4 -x4 https://raw.githubusercontent.com/310DSD/lz4n/main/lz4_mod_main.c -o lz4_mod_main.c
           
-          # =========================================================
-          # 2. 【核心修复】：千万不要漏掉这一块！将用户态 C 标准库头文件替换为 Linux 内核头文件
-          # =========================================================
+          # 2. 对官方 LZ4 源码进行完美内核态适配
           echo "正在将 LZ4 源码适配为内核态代码..."
           sed -i 's/<stddef.h>/<linux\/types.h>/g' lz4.h lz4_core.c
           sed -i 's/<stdint.h>/<linux\/types.h>/g' lz4.h lz4_core.c
@@ -740,14 +737,102 @@ jobs:
           sed -i 's/<string.h>/<linux\/string.h>/g' lz4.h lz4_core.c
           sed -i 's/<limits.h>/<linux\/limits.h>/g' lz4.h lz4_core.c
           
-          # 4. 生成 Makefile，注意这里的 ccflags-y 是为了切断用户态依赖
+          # 3. 【核心跨代修复】：原地动态生成完全兼容最新版 LZ4 API 的包装层
+          echo "正在原地构建最新版 Crypto 包装层主文件..."
+          cat << 'EOF' > lz4_mod_main.c
+          #include <linux/init.h>
+          #include <linux/module.h>
+          #include <linux/crypto.h>
+          #include <linux/vmalloc.h>
+          #include <crypto/internal/scompress.h>
+          #include "lz4.h"
+
+          // 分配最新版 LZ4 压缩所需的 state 临时缓冲区内存
+          static void *lz4_alloc_ctx(struct crypto_scomp *tfm)
+          {
+              void *ctx;
+              ctx = vmalloc(LZ4_sizeofState());
+              if (!ctx)
+                  return ERR_PTR(-ENOMEM);
+              return ctx;
+          }
+
+          static void lz4_free_ctx(struct crypto_scomp *tfm, void *ctx)
+          {
+              vfree(ctx);
+          }
+
+          static int lz4_scompress(struct crypto_scomp *tfm, const u8 *src,
+                                   unsigned int slen, u8 *dst, unsigned int *dlen,
+                                   void *ctx)
+          {
+              int out_len;
+              
+              // 针对最新版 LZ4，使用正确的带外部 ctx 且支持加速的加速扩展接口
+              out_len = LZ4_compress_fast_extState(ctx, (const char *)src, (char *)dst, 
+                                                   slen, *dlen, 1);
+              if (!out_len)
+                  return -EINVAL;
+
+              *dlen = out_len;
+              return 0;
+          }
+
+          static int lz4_sdecompress(struct crypto_scomp *tfm, const u8 *src,
+                                     unsigned int slen, u8 *dst, unsigned int *dlen,
+                                     void *ctx)
+          {
+              int out_len;
+
+              out_len = LZ4_decompress_safe((const char *)src, (char *)dst, slen, *dlen);
+              if (out_len < 0)
+                  return -EINVAL;
+
+              *dlen = out_len;
+              return 0;
+          }
+
+          static struct scomp_alg scomp = {
+              .alloc_ctx		= lz4_alloc_ctx,
+              .free_ctx		= lz4_free_ctx,
+              .compress		= lz4_scompress,
+              .decompress		= lz4_sdecompress,
+              .base			= {
+                  .cra_name	= "lz4n",
+                  .cra_driver_name = "lz4n-scomp",
+                  .cra_module	 = THIS_MODULE,
+              }
+          };
+
+          static int __init lz4_mod_init(void)
+          {
+              return crypto_register_scomp(&scomp);
+          }
+
+          static void __exit lz4_mod_fini(void)
+          {
+              crypto_unregister_scomp(&scomp);
+          }
+
+          module_init(lz4_mod_init);
+          module_exit(lz4_mod_fini);
+
+          MODULE_LICENSE("GPL");
+          MODULE_DESCRIPTION("LZ4N Standard Modern v1.10+ LKM");
+          EOF
+          
+          # 4. 生成 Makefile，并注入核心宏以满足 LZ4_FREESTANDING 对内核标准函数的映射请求
           echo "正在创建内核模块 Makefile..."
           cat << 'EOF' > Makefile
           obj-m += my_lz4_mod.o
           my_lz4_mod-y := lz4_mod_main.o lz4_core.o
           
-          # 添加编译优化和独立运行环境宏
-          ccflags-y := -O3 -DLZ4_FREESTANDING=1 -DLZ4_DISABLE_DEPRECATE_WARNINGS=1
+          # 核心修复：通过 -D 宏将 LZ4_memcpy 等直接桥接到 Linux 内核原生的高效全局函数中
+          ccflags-y := -O3 -DLZ4_FREESTANDING=1 \
+                       -DLZ4_memcpy=memcpy \
+                       -DLZ4_memset=memset \
+                       -DLZ4_memmove=memmove \
+                       -DLZ4_DISABLE_DEPRECATE_WARNINGS=1
           EOF
 
           echo "开始编译 LZ4 模块..."
@@ -758,12 +843,13 @@ jobs:
           make -C $KDIR M=$PWD ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 modules
           
           if [ -f my_lz4_mod.ko ]; then
-             echo "=== LZ4 模块编译成功！ ==="
+             echo "=== LZ4 模块编译成功！已生成现代版 my_lz4_mod.ko ==="
              file my_lz4_mod.ko
           else
              echo "ERROR: LZ4 模块编译失败"
              exit 1
           fi
+
 
 
 
