@@ -730,78 +730,14 @@ jobs:
           aria2c -s4 -x4 https://raw.githubusercontent.com/lz4/lz4/v1.10.0/lib/lz4.c -o lz4_core.c
           aria2c -s4 -x4 https://raw.githubusercontent.com/lz4/lz4/v1.10.0/lib/lz4.h -o lz4.h
           
-          echo "构建微架构级内核优化头文件 (lz4defs.h)..."
-          cat << 'EOF' > lz4defs.h
-          #ifndef __LZ4DEFS_H__
-          #define __LZ4DEFS_H__
-          
-          #include <linux/types.h>
-          #include <linux/string.h>
-          #include <linux/unaligned.h>
-          #include <linux/bitops.h>
-          
-          /* 强制内联及类型定义 */
-          #define FORCE_INLINE __always_inline
-          typedef uint8_t BYTE;
-          typedef uint16_t U16;
-          typedef uint32_t U32;
-          typedef int32_t S32;
-          typedef uint64_t U64;
-          typedef uintptr_t uptrval;
-          
-          /* 架构判定 */
-          #if defined(CONFIG_64BIT)
-          #define LZ4_ARCH64 1
-          #else
-          #define LZ4_ARCH64 0
-          #endif
-          
-          /* 核心拷贝宏重写：利用内核 unaligned 接口压榨 ARM64 访存带宽 */
-          static FORCE_INLINE U16 LZ4_read16(const void *ptr) { return get_unaligned((const U16 *)ptr); }
-          static FORCE_INLINE U32 LZ4_read32(const void *ptr) { return get_unaligned((const U32 *)ptr); }
-          static FORCE_INLINE size_t LZ4_read_ARCH(const void *ptr) { return get_unaligned((const size_t *)ptr); }
-          static FORCE_INLINE void LZ4_write16(void *memPtr, U16 value) { put_unaligned(value, (U16 *)memPtr); }
-          static FORCE_INLINE void LZ4_write32(void *memPtr, U32 value) { put_unaligned(value, (U32 *)memPtr); }
-          static FORCE_INLINE U16 LZ4_readLE16(const void *memPtr) { return get_unaligned_le16(memPtr); }
-          static FORCE_INLINE void LZ4_writeLE16(void *memPtr, U16 value) { return put_unaligned_le16(value, memPtr); }
-          
-          /* 【核心修复】：补齐 memset，并使用 builtin 让编译器生成最高效的内联汇编 */
-          #define LZ4_memcpy(dst, src, size) __builtin_memcpy(dst, src, size)
-          #define LZ4_memmove(dst, src, size) __builtin_memmove(dst, src, size)
-          #define LZ4_memset(dst, val, size) __builtin_memset(dst, val, size)
-          
-          /* 8 字节暴风式拷贝 */
-          static FORCE_INLINE void LZ4_copy8(void *dst, const void *src) {
-          #if LZ4_ARCH64
-              U64 a = get_unaligned((const U64 *)src);
-              put_unaligned(a, (U64 *)dst);
-          #else
-              U32 a = get_unaligned((const U32 *)src);
-              U32 b = get_unaligned((const U32 *)src + 1);
-              put_unaligned(a, (U32 *)dst);
-              put_unaligned(b, (U32 *)dst + 1);
-          #endif
-          }
-          
-          static FORCE_INLINE void LZ4_wildCopy(void *dstPtr, const void *srcPtr, void *dstEnd) {
-              BYTE *d = (BYTE *)dstPtr;
-              const BYTE *s = (const BYTE *)srcPtr;
-              BYTE *const e = (BYTE *)dstEnd;
-              do {
-                  LZ4_copy8(d, s);
-                  d += 8;
-                  s += 8;
-              } while (d < e);
-          }
-          #endif
-          EOF
-          
-          echo "将 LZ4 源码适配为内核态并强行挂载特化宏..."
-          # 解决变量名冲突
+          echo "将 LZ4 源码适配为内核态代码..."
+          # 精准避开内核全局宏 current
           sed -i 's/\<current\>/current_val/g' lz4_core.c
-          # 强行注入配置宏及特化头文件
-          sed -i '1i #define LZ4_FREESTANDING 1\n#define LZ4_USER_MEMORY_FUNCTIONS\n#include "lz4defs.h"' lz4_core.c lz4.h
-          # 屏蔽掉原文件里冲突的 C 标准库
+          
+          # 强行注入 Linux 内核基础头文件
+          sed -i '1i #include <linux/types.h>\n#include <linux/string.h>\n#include <linux/slab.h>' lz4_core.c lz4.h
+          
+          # 屏蔽掉原文件里的用户态 C 标准库引用
           sed -i 's/<stddef.h>/<linux\/types.h>/g' lz4.h lz4_core.c
           sed -i 's/<stdint.h>/<linux\/types.h>/g' lz4.h lz4_core.c
           sed -i 's/<stdlib.h>/<linux\/slab.h>/g' lz4.h lz4_core.c
@@ -901,8 +837,13 @@ jobs:
           obj-m += my_lz4_mod.o
           my_lz4_mod-y := lz4_mod_main.o lz4_core.o
           
-          # 剔除了多余的 -D 传参，避免被构建系统过滤
-          ccflags-y := -O3 -Wno-frame-larger-than -Wno-error=frame-larger-than
+          # 【终极核心】：直接通过编译器内置函数 __builtin_XXX 满足 LZ4_FREESTANDING 需求
+          ccflags-y := -O3 -DLZ4_FREESTANDING=1 \
+                       -DLZ4_memcpy=__builtin_memcpy \
+                       -DLZ4_memset=__builtin_memset \
+                       -DLZ4_memmove=__builtin_memmove \
+                       -DLZ4_DISABLE_DEPRECATE_WARNINGS=1 \
+                       -Wno-frame-larger-than -Wno-error=frame-larger-than
           EOF
 
           export KSRC="$GITHUB_WORKSPACE/kernel_workspace/common"
@@ -919,12 +860,13 @@ jobs:
           make -C $KSRC O=$KOUT M=$PWD ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 KBUILD_MODPOST_WARN=1 modules
           
           if [ -f my_lz4_mod.ko ]; then
-             echo "=== LZ4 模块编译成功！已生成双接口、微架构特化版 my_lz4_mod.ko ==="
+             echo "=== LZ4 模块编译成功！已生成原汁原味极致版 my_lz4_mod.ko ==="
              file my_lz4_mod.ko
           else
              echo "ERROR: LZ4 模块编译失败"
              exit 1
           fi
+
 
 
 
