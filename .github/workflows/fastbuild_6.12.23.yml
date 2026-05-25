@@ -729,13 +729,16 @@ jobs:
           aria2c -s4 -x4 https://raw.githubusercontent.com/lz4/lz4/dev/lib/lz4.c -o lz4_core.c
           aria2c -s4 -x4 https://raw.githubusercontent.com/lz4/lz4/dev/lib/lz4.h -o lz4.h
           
-          # 2. 暴力注入内核宏与头文件
+          # 2. 暴力注入内核宏、头文件，并解决变量名冲突
           echo "正在将 LZ4 源码强行适配为内核态代码..."
           
-          # 【最终修复】：强行在文件最顶部注入 Linux 内核头文件，无视内部的跳过逻辑
+          # 【精准替换】：使用 \< 和 \> 精确匹配整个单词 current，避开内核全局宏，且不误伤其他单词
+          sed -i 's/\<current\>/current_val/g' lz4_core.c
+          
+          # 强行在文件最顶部注入 Linux 内核基础组件头文件
           sed -i '1i #include <linux/types.h>\n#include <linux/string.h>\n#include <linux/slab.h>' lz4_core.c lz4.h
           
-          # 清理原文件自带的用户态标准库（做个兜底防错）
+          # 清理原文件自带的用户态标准库，防止编译器去找 glibc
           sed -i 's/<stddef.h>/<linux\/types.h>/g' lz4.h lz4_core.c
           sed -i 's/<stdint.h>/<linux\/types.h>/g' lz4.h lz4_core.c
           sed -i 's/<stdlib.h>/<linux\/slab.h>/g' lz4.h lz4_core.c
@@ -749,6 +752,7 @@ jobs:
           #include <linux/module.h>
           #include <linux/crypto.h>
           #include <linux/vmalloc.h>
+          #include <linux/err.h>  // 新增：确保 ERR_PTR 和 IS_ERR 宏绝对可用
           #include <crypto/internal/scompress.h>
           #include "lz4.h"
 
@@ -825,6 +829,7 @@ jobs:
           obj-m += my_lz4_mod.o
           my_lz4_mod-y := lz4_mod_main.o lz4_core.o
           
+          # 核心修正：挂载所有的宏和内存库映射
           ccflags-y := -O3 -DLZ4_FREESTANDING=1 \
                        -DLZ4_memcpy=memcpy \
                        -DLZ4_memset=memset \
@@ -846,6 +851,7 @@ jobs:
              echo "ERROR: LZ4 模块编译失败"
              exit 1
           fi
+
 
 
 
