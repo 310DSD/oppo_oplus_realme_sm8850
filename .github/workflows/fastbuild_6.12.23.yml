@@ -720,114 +720,6 @@ jobs:
 
       - name: 独立编译最新版 LZ4 内核模块 (LKM)
         run: |
-          echo "正在获取 LZ4 最新官方源码..."
-          cd kernel_workspace
-          mkdir -p lz4_mod
-          cd lz4_mod
-          
-          # 1. 仅拉取 GitHub 官方最新源码
-          aria2c -s4 -x4 https://raw.githubusercontent.com/lz4/lz4/dev/lib/lz4.c -o lz4_core.c
-          aria2c -s4 -x4 https://raw.githubusercontent.com/lz4/lz4/dev/lib/lz4.h -o lz4.h
-          
-          # 2. 暴力注入内核宏、头文件，并解决变量名冲突
-          echo "正在将 LZ4 源码强行适配为内核态代码..."
-          
-          # 精确替换变量 current 为 current_val，避开内核全局宏
-          sed -i 's/\<current\>/current_val/g' lz4_core.c
-          
-          # 强行在文件最顶部注入 Linux 内核基础组件头文件
-          sed -i '1i #include <linux/types.h>\n#include <linux/string.h>\n#include <linux/slab.h>' lz4_core.c lz4.h
-          
-          # 清理原文件自带的用户态标准库，防止编译器去找 glibc
-          sed -i 's/<stddef.h>/<linux\/types.h>/g' lz4.h lz4_core.c
-          sed -i 's/<stdint.h>/<linux\/types.h>/g' lz4.h lz4_core.c
-          sed -i 's/<stdlib.h>/<linux\/slab.h>/g' lz4.h lz4_core.c
-          sed -i 's/<string.h>/<linux\/string.h>/g' lz4.h lz4_core.c
-          sed -i 's/<limits.h>/<linux\/limits.h>/g' lz4.h lz4_core.c
-          
-          # 3. 原地构建完美兼容最新版 LZ4 API 的包装层
-          echo "正在原地构建最新版 Crypto 包装层主文件..."
-          cat << 'EOF' > lz4_mod_main.c
-          #include <linux/init.h>
-          #include <linux/module.h>
-          #include <linux/crypto.h>
-          #include <linux/vmalloc.h>
-          #include <linux/err.h>
-          #include <crypto/internal/scompress.h>
-          #include "lz4.h"
-
-          static void *lz4_alloc_ctx(struct crypto_scomp *tfm)
-          {
-              void *ctx = vmalloc(LZ4_sizeofState());
-              if (!ctx)
-                  return ERR_PTR(-ENOMEM);
-              return ctx;
-          }
-
-          static void lz4_free_ctx(struct crypto_scomp *tfm, void *ctx)
-          {
-              vfree(ctx);
-          }
-
-          static int lz4_scompress(struct crypto_scomp *tfm, const u8 *src,
-                                   unsigned int slen, u8 *dst, unsigned int *dlen,
-                                   void *ctx)
-          {
-              int out_len;
-              out_len = LZ4_compress_fast_extState(ctx, (const char *)src, (char *)dst, 
-                                                   slen, *dlen, 1);
-              if (!out_len)
-                  return -EINVAL;
-              *dlen = out_len;
-              return 0;
-          }
-
-          static int lz4_sdecompress(struct crypto_scomp *tfm, const u8 *src,
-                                     unsigned int slen, u8 *dst, unsigned int *dlen,
-                                     void *ctx)
-          {
-              int out_len;
-              out_len = LZ4_decompress_safe((const char *)src, (char *)dst, slen, *dlen);
-              if (out_len < 0)
-                  return -EINVAL;
-              *dlen = out_len;
-              return 0;
-          }
-
-          static struct scomp_alg scomp = {
-              .alloc_ctx		= lz4_alloc_ctx,
-              .free_ctx		= lz4_free_ctx,
-              .compress		= lz4_scompress,
-              .decompress		= lz4_sdecompress,
-              .base			= {
-                  .cra_name	= "lz4n",
-                  .cra_driver_name = "lz4n-scomp",
-                  .cra_module	 = THIS_MODULE,
-              }
-          };
-
-          static int __init lz4_mod_init(void)
-          {
-              return crypto_register_scomp(&scomp);
-          }
-
-          static void __exit lz4_mod_fini(void)
-          {
-              crypto_unregister_scomp(&scomp);
-          }
-
-          module_init(lz4_mod_init);
-          module_exit(lz4_mod_fini);
-
-          MODULE_LICENSE("GPL");
-          MODULE_DESCRIPTION("LZ4N Standard Modern v1.10+ LKM");
-          EOF
-          
-          # 4. 生成内核模块 Makefile
-          echo "正在创建内核模块 Makefile..."
-          cat << 'EOF' > Makefile
-      - name: 独立编译最新版 LZ4 内核模块 (LKM)
-        run: |
           echo "清理旧目录，确保环境纯净..."
           cd kernel_workspace
           rm -rf lz4_mod
@@ -848,57 +740,85 @@ jobs:
           sed -i 's/<limits.h>/<linux\/limits.h>/g' lz4.h lz4_core.c
           
           echo "构建 Crypto 包装层主文件..."
+          # 【核心修复】：换回 ZRAM 唯一认定的 CRYPTO_ALG_TYPE_COMPRESS 接口
           cat << 'EOF' > lz4_mod_main.c
           #include <linux/init.h>
           #include <linux/module.h>
           #include <linux/crypto.h>
           #include <linux/vmalloc.h>
           #include <linux/err.h>
-          #include <crypto/internal/scompress.h>
           #include "lz4.h"
 
-          static void *lz4_alloc_ctx(struct crypto_scomp *tfm) {
-              void *ctx = vmalloc(LZ4_sizeofState());
-              if (!ctx) return ERR_PTR(-ENOMEM);
-              return ctx;
-          }
-
-          static void lz4_free_ctx(struct crypto_scomp *tfm, void *ctx) {
-              vfree(ctx);
-          }
-
-          static int lz4_scompress(struct crypto_scomp *tfm, const u8 *src, unsigned int slen, u8 *dst, unsigned int *dlen, void *ctx) {
-              int out_len = LZ4_compress_fast_extState(ctx, (const char *)src, (char *)dst, slen, *dlen, 1);
-              if (!out_len) return -EINVAL;
-              *dlen = out_len;
-              return 0;
-          }
-
-          static int lz4_sdecompress(struct crypto_scomp *tfm, const u8 *src, unsigned int slen, u8 *dst, unsigned int *dlen, void *ctx) {
-              int out_len = LZ4_decompress_safe((const char *)src, (char *)dst, slen, *dlen);
-              if (out_len < 0) return -EINVAL;
-              *dlen = out_len;
-              return 0;
-          }
-
-          static struct scomp_alg scomp = {
-              .alloc_ctx = lz4_alloc_ctx,
-              .free_ctx = lz4_free_ctx,
-              .compress = lz4_scompress,
-              .decompress = lz4_sdecompress,
-              .base = {
-                  .cra_name = "lz4n",
-                  .cra_driver_name = "lz4n-scomp",
-                  .cra_module = THIS_MODULE,
-              }
+          struct lz4_ctx {
+              void *lz4_comp_mem;
           };
 
-          static int __init lz4_mod_init(void) { return crypto_register_scomp(&scomp); }
-          static void __exit lz4_mod_fini(void) { crypto_unregister_scomp(&scomp); }
+          static int lz4_comp_init(struct crypto_tfm *tfm)
+          {
+              struct lz4_ctx *ctx = crypto_tfm_ctx(tfm);
+              ctx->lz4_comp_mem = vmalloc(LZ4_sizeofState());
+              if (!ctx->lz4_comp_mem)
+                  return -ENOMEM;
+              return 0;
+          }
+
+          static void lz4_comp_exit(struct crypto_tfm *tfm)
+          {
+              struct lz4_ctx *ctx = crypto_tfm_ctx(tfm);
+              vfree(ctx->lz4_comp_mem);
+          }
+
+          static int lz4_compress_crypto(struct crypto_tfm *tfm, const u8 *src,
+                                         unsigned int slen, u8 *dst, unsigned int *dlen)
+          {
+              struct lz4_ctx *ctx = crypto_tfm_ctx(tfm);
+              int out_len = LZ4_compress_fast_extState(ctx->lz4_comp_mem,
+                                                       (const char *)src, (char *)dst,
+                                                       slen, *dlen, 1);
+              if (!out_len)
+                  return -EINVAL;
+              *dlen = out_len;
+              return 0;
+          }
+
+          static int lz4_decompress_crypto(struct crypto_tfm *tfm, const u8 *src,
+                                           unsigned int slen, u8 *dst, unsigned int *dlen)
+          {
+              int out_len = LZ4_decompress_safe((const char *)src, (char *)dst, slen, *dlen);
+              if (out_len < 0)
+                  return -EINVAL;
+              *dlen = out_len;
+              return 0;
+          }
+
+          static struct crypto_alg alg_lz4n = {
+              .cra_name           = "lz4n",
+              .cra_driver_name    = "lz4n-comp",
+              .cra_flags          = CRYPTO_ALG_TYPE_COMPRESS,
+              .cra_ctxsize        = sizeof(struct lz4_ctx),
+              .cra_module         = THIS_MODULE,
+              .cra_init           = lz4_comp_init,
+              .cra_exit           = lz4_comp_exit,
+              .cra_u              = { .compress = {
+                  .coa_compress   = lz4_compress_crypto,
+                  .coa_decompress = lz4_decompress_crypto } }
+          };
+
+          static int __init lz4_mod_init(void)
+          {
+              return crypto_register_alg(&alg_lz4n);
+          }
+
+          static void __exit lz4_mod_fini(void)
+          {
+              crypto_unregister_alg(&alg_lz4n);
+          }
 
           module_init(lz4_mod_init);
           module_exit(lz4_mod_fini);
+
           MODULE_LICENSE("GPL");
+          MODULE_DESCRIPTION("LZ4N Standard Modern v1.10+ LKM");
           EOF
           
           echo "创建内核模块 Makefile..."
@@ -913,7 +833,7 @@ jobs:
           export KOUT="$GITHUB_WORKSPACE/kernel_workspace/common/out"
           export PATH="$GITHUB_WORKSPACE/kernel_workspace/clang19/bin:$PATH"
           
-          echo "【核心修复】：补全内核模块构建环境 (modules_prepare)..."
+          echo "补全内核模块构建环境 (modules_prepare)..."
           make -C $KSRC O=$KOUT ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 modules_prepare
           
           echo "拷贝符号表以满足 Modpost 检查..."
@@ -929,6 +849,7 @@ jobs:
              echo "ERROR: LZ4 模块编译失败"
              exit 1
           fi
+
 
 
       - name: 提取并单独上传 LZ4 模块
