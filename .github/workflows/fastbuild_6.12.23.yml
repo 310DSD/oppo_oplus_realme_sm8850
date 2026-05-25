@@ -725,19 +725,34 @@ jobs:
           mkdir -p lz4_mod
           cd lz4_mod
           
-          # 获取官方最新算法及 310DSD 仓库的 main.c
+          # 1. 获取官方最新算法及 310DSD 仓库的 main.c
           aria2c -s4 -x4 https://raw.githubusercontent.com/lz4/lz4/dev/lib/lz4.c -o lz4_core.c
           aria2c -s4 -x4 https://raw.githubusercontent.com/lz4/lz4/dev/lib/lz4.h -o lz4.h
           aria2c -s4 -x4 https://raw.githubusercontent.com/310DSD/lz4n/main/lz4_mod_main.c -o lz4_mod_main.c
           
-          # 生成 Makefile
+          # 2. 【核心修复】：将用户态 C 标准库头文件替换为 Linux 内核头文件
+          echo "正在将 LZ4 源码适配为内核态代码..."
+          sed -i 's/<stddef.h>/<linux\/types.h>/g' lz4.h lz4_core.c
+          sed -i 's/<stdint.h>/<linux\/types.h>/g' lz4.h lz4_core.c
+          sed -i 's/<stdlib.h>/<linux\/slab.h>/g' lz4.h lz4_core.c
+          sed -i 's/<string.h>/<linux\/string.h>/g' lz4.h lz4_core.c
+          sed -i 's/<limits.h>/<linux\/limits.h>/g' lz4.h lz4_core.c
+          
+          # 3. 修复 310DSD 源码中的 alg_lz4 报错残留（如果之前加了的话继续保留）
+          echo "正在清理包装层语法残留..."
+          sed -i '/alg_lz4/d' lz4_mod_main.c
+          
+          # 4. 生成 Makefile，并加入 -DLZ4_FREESTANDING=1 宏切断其余依赖
+          echo "正在创建内核模块 Makefile..."
           cat << 'EOF' > Makefile
           obj-m += my_lz4_mod.o
           my_lz4_mod-y := lz4_mod_main.o lz4_core.o
+          
+          # 添加编译优化和独立运行环境宏
+          ccflags-y := -O3 -DLZ4_FREESTANDING=1 -DLZ4_DISABLE_DEPRECATE_WARNINGS=1
           EOF
 
           echo "开始编译 LZ4 模块..."
-          # 【关键修正】：KDIR 必须指向 common/out，因为那里才是生成的构建配置所在！
           export KDIR="$GITHUB_WORKSPACE/kernel_workspace/common/out"
           export PATH="$GITHUB_WORKSPACE/kernel_workspace/clang19/bin:$PATH"
           
@@ -751,6 +766,7 @@ jobs:
              echo "ERROR: LZ4 模块编译失败"
              exit 1
           fi
+
 
       - name: 提取并单独上传 LZ4 模块
         uses: actions/upload-artifact@v4
