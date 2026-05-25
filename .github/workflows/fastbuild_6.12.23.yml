@@ -727,75 +727,6 @@ jobs:
           cd lz4_mod
           
           echo "获取 LZ4 最新官方源码..."
-          aria2c -s4 -x4 https://raw.githubusercontent.com/lz4/lz4/dev/lib/lz4.c -o lz4_core.c
-          aria2c -s4 -x4 https://raw.githubusercontent.com/lz4/lz4/dev/lib/lz4.h -o lz4.h
-          
-          echo "注入内核宏、头文件，并解决变量名冲突..."
-          sed -i 's/\<current\>/current_val/g' lz4_core.c
-          sed -i '1i #include <linux/types.h>\n#include <linux/string.h>\n#include <linux/slab.h>' lz4_core.c lz4.h
-          sed -i 's/<stddef.h>/<linux\/types.h>/g' lz4.h lz4_core.c
-          sed -i 's/<stdint.h>/<linux\/types.h>/g' lz4.h lz4_core.c
-          sed -i 's/<stdlib.h>/<linux\/slab.h>/g' lz4.h lz4_core.c
-          sed -i 's/<string.h>/<linux\/string.h>/g' lz4.h lz4_core.c
-          sed -i 's/<limits.h>/<linux\/limits.h>/g' lz4.h lz4_core.c
-          
-          echo "构建 Crypto 包装层主文件..."
-          # 【终极修复】：引入 algapi.h 解决 6.12 API 报错，并同时注册新老两套接口
-          cat << 'EOF' > lz4_mod_main.c
-          #include <linux/init.h>
-          #include <linux/module.h>
-          #include <linux/crypto.h>
-          #include <crypto/algapi.h> // 必须引入此头文件才能调用 crypto_register_alg 和 crypto_tfm_ctx
-          #include <crypto/internal/scompress.h>
-          #include <linux/vmalloc.h>
-          #include <linux/err.h>
-          #include "lz4.h"
-
-          struct lz4_ctx {
-              void *lz4_comp_mem;
-          };
-
-          static void *lz4_alloc_ctx(struct crypto_scomp *tfm) {
-              void *ctx = vmalloc(LZ4_sizeofState());
-              if (!ctx) return ERR_PTR(-ENOMEM);
-              return ctx;
-          }
-
-          static void lz4_free_ctx(struct crypto_scomp *tfm, void *ctx) {
-              vfree(ctx);
-          }
-
-          static int lz4_init(struct crypto_tfm *tfm) {
-              struct lz4_ctx *ctx = crypto_tfm_ctx(tfm);
-              ctx->lz4_comp_mem = lz4_alloc_ctx(NULL);
-              if (IS_ERR(ctx->lz4_comp_mem)) return PTR_ERR(ctx->lz4_comp_mem);
-              return 0;
-          }
-
-          static void lz4_exit(struct crypto_tfm *tfm) {
-              struct lz4_ctx *ctx = crypto_tfm_ctx(tfm);
-              lz4_free_ctx(NULL, ctx->lz4_comp_mem);
-          }
-
-          static int __lz4_compress_crypto(const u8 *src, unsigned int slen, u8 *dst, unsigned int *dlen, void *ctx) {
-              int out_len = LZ4_compress_fast_extState(ctx, (const char *)src, (char *)dst, slen, *dlen, 1);
-              if (!out_len) return -EINVAL;
-              *dlen = out_len;
-              return 0;
-          }
-
-          static int lz4_scompress(struct crypto_scomp *tfm, const u8 *src, unsigned int slen, u8 *dst, unsigned int *dlen, void *ctx) {
-              return __lz4_compress_crypto(src, slen, dst, dlen, ctx);
-          }
-      - name: 独立编译最新版 LZ4 内核模块 (LKM)
-        run: |
-          echo "清理旧目录，确保环境纯净..."
-          cd kernel_workspace
-          rm -rf lz4_mod
-          mkdir -p lz4_mod
-          cd lz4_mod
-          
-          echo "获取 LZ4 最新官方源码..."
           aria2c -s4 -x4 https://raw.githubusercontent.com/lz4/lz4/v1.10.0/lib/lz4.c -o lz4_core.c
           aria2c -s4 -x4 https://raw.githubusercontent.com/lz4/lz4/v1.10.0/lib/lz4.h -o lz4.h
           
@@ -834,9 +765,10 @@ jobs:
           static FORCE_INLINE U16 LZ4_readLE16(const void *memPtr) { return get_unaligned_le16(memPtr); }
           static FORCE_INLINE void LZ4_writeLE16(void *memPtr, U16 value) { return put_unaligned_le16(value, memPtr); }
           
-          /* 使用内置函数规避未定义引用 */
+          /* 【核心修复】：补齐 memset，并使用 builtin 让编译器生成最高效的内联汇编 */
           #define LZ4_memcpy(dst, src, size) __builtin_memcpy(dst, src, size)
           #define LZ4_memmove(dst, src, size) __builtin_memmove(dst, src, size)
+          #define LZ4_memset(dst, val, size) __builtin_memset(dst, val, size)
           
           /* 8 字节暴风式拷贝 */
           static FORCE_INLINE void LZ4_copy8(void *dst, const void *src) {
@@ -867,7 +799,7 @@ jobs:
           echo "将 LZ4 源码适配为内核态并强行挂载特化宏..."
           # 解决变量名冲突
           sed -i 's/\<current\>/current_val/g' lz4_core.c
-          # 将我们刚生成的硬件级优化头文件，以及必要的宏置顶注入到官方源码中
+          # 强行注入配置宏及特化头文件
           sed -i '1i #define LZ4_FREESTANDING 1\n#define LZ4_USER_MEMORY_FUNCTIONS\n#include "lz4defs.h"' lz4_core.c lz4.h
           # 屏蔽掉原文件里冲突的 C 标准库
           sed -i 's/<stddef.h>/<linux\/types.h>/g' lz4.h lz4_core.c
@@ -969,7 +901,7 @@ jobs:
           obj-m += my_lz4_mod.o
           my_lz4_mod-y := lz4_mod_main.o lz4_core.o
           
-          # -O3 暴力优化，关闭恼人的警告
+          # 剔除了多余的 -D 传参，避免被构建系统过滤
           ccflags-y := -O3 -Wno-frame-larger-than -Wno-error=frame-larger-than
           EOF
 
