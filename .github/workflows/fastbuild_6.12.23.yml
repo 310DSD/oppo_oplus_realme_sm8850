@@ -726,18 +726,68 @@ jobs:
           mkdir -p lz4_mod
           cd lz4_mod
           
-          echo "获取 LZ4 最新官方源码..."
-          aria2c -s4 -x4 https://raw.githubusercontent.com/lz4/lz4/v1.10.0/lib/lz4.c -o lz4_core.c
-          aria2c -s4 -x4 https://raw.githubusercontent.com/lz4/lz4/v1.10.0/lib/lz4.h -o lz4.h
+          echo "获取 LZ4 源码库并动态合并 PR #1723 与 #1724..."
+          git clone https://github.com/lz4/lz4.git lz4_src
+          cd lz4_src
+          
+          # 动态拉取 PR 1723 (AArch64 wildCopy64 优化)
+          git fetch origin pull/1723/head:pr1723
+          git merge --no-edit pr1723
+          
+          # 动态拉取 PR 1724 (Stream end 分支预测优化)
+          git fetch origin pull/1724/head:pr1724
+          git merge --no-edit pr1724
+          
+          # 提取打完补丁的核心源码
+          cp lib/lz4.c lib/lz4.h ../
+          cd ..
+          rm -rf lz4_src
+          
+          echo "构建微架构级内核优化头文件 (lz4defs.h)..."
+          # PR 1723 已解决 AArch64 拷贝问题，只需保留最基础的对齐与内存宏满足内核环境
+          cat << 'EOF' > lz4defs.h
+          #ifndef __LZ4DEFS_H__
+          #define __LZ4DEFS_H__
+          
+          #include <linux/types.h>
+          #include <linux/string.h>
+          #include <linux/unaligned.h>
+          
+          #define FORCE_INLINE __always_inline
+          typedef uint8_t BYTE;
+          typedef uint16_t U16;
+          typedef uint32_t U32;
+          typedef int32_t S32;
+          typedef uint64_t U64;
+          typedef uintptr_t uptrval;
+          
+          #if defined(CONFIG_64BIT)
+          #define LZ4_ARCH64 1
+          #else
+          #define LZ4_ARCH64 0
+          #endif
+          
+          /* 依然保留基础的读取特化，配合 PR #1723 达到极致性能 */
+          static FORCE_INLINE U16 LZ4_read16(const void *ptr) { return get_unaligned((const U16 *)ptr); }
+          static FORCE_INLINE U32 LZ4_read32(const void *ptr) { return get_unaligned((const U32 *)ptr); }
+          static FORCE_INLINE size_t LZ4_read_ARCH(const void *ptr) { return get_unaligned((const size_t *)ptr); }
+          static FORCE_INLINE void LZ4_write16(void *memPtr, U16 value) { put_unaligned(value, (U16 *)memPtr); }
+          static FORCE_INLINE void LZ4_write32(void *memPtr, U32 value) { put_unaligned(value, (U32 *)memPtr); }
+          static FORCE_INLINE U16 LZ4_readLE16(const void *memPtr) { return get_unaligned_le16(memPtr); }
+          static FORCE_INLINE void LZ4_writeLE16(void *memPtr, U16 value) { return put_unaligned_le16(value, memPtr); }
+          
+          /* 通过 Built-in 满足 FREESTANDING 的严格要求 */
+          #define LZ4_memcpy(dst, src, size) __builtin_memcpy(dst, src, size)
+          #define LZ4_memmove(dst, src, size) __builtin_memmove(dst, src, size)
+          #define LZ4_memset(dst, val, size) __builtin_memset(dst, val, size)
+          
+          #endif
+          EOF
           
           echo "将 LZ4 源码适配为内核态代码..."
-          # 精准避开内核全局宏 current
           sed -i 's/\<current\>/current_val/g' lz4_core.c
+          sed -i '1i #define LZ4_FREESTANDING 1\n#define LZ4_USER_MEMORY_FUNCTIONS\n#include "lz4defs.h"' lz4_core.c lz4.h
           
-          # 强行注入 Linux 内核基础头文件
-          sed -i '1i #include <linux/types.h>\n#include <linux/string.h>\n#include <linux/slab.h>' lz4_core.c lz4.h
-          
-          # 屏蔽掉原文件里的用户态 C 标准库引用
           sed -i 's/<stddef.h>/<linux\/types.h>/g' lz4.h lz4_core.c
           sed -i 's/<stdint.h>/<linux\/types.h>/g' lz4.h lz4_core.c
           sed -i 's/<stdlib.h>/<linux\/slab.h>/g' lz4.h lz4_core.c
@@ -837,13 +887,7 @@ jobs:
           obj-m += my_lz4_mod.o
           my_lz4_mod-y := lz4_mod_main.o lz4_core.o
           
-          # 【终极核心】：直接通过编译器内置函数 __builtin_XXX 满足 LZ4_FREESTANDING 需求
-          ccflags-y := -O3 -DLZ4_FREESTANDING=1 \
-                       -DLZ4_memcpy=__builtin_memcpy \
-                       -DLZ4_memset=__builtin_memset \
-                       -DLZ4_memmove=__builtin_memmove \
-                       -DLZ4_DISABLE_DEPRECATE_WARNINGS=1 \
-                       -Wno-frame-larger-than -Wno-error=frame-larger-than
+          ccflags-y := -O3 -Wno-frame-larger-than -Wno-error=frame-larger-than
           EOF
 
           export KSRC="$GITHUB_WORKSPACE/kernel_workspace/common"
@@ -860,7 +904,7 @@ jobs:
           make -C $KSRC O=$KOUT M=$PWD ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 KBUILD_MODPOST_WARN=1 modules
           
           if [ -f my_lz4_mod.ko ]; then
-             echo "=== LZ4 模块编译成功！已生成原汁原味极致版 my_lz4_mod.ko ==="
+             echo "=== LZ4 模块编译成功！已完美集成 PR 1723 & 1724 杀手级优化 ==="
              file my_lz4_mod.ko
           else
              echo "ERROR: LZ4 模块编译失败"
