@@ -738,8 +738,9 @@ jobs:
           git fetch origin pull/1723/head:pr1723
           git merge --no-edit pr1723
           
-          # 提取打完补丁的核心源码
-          cp lib/lz4.c lib/lz4.h ../
+          # 【核心修复】：提取打完补丁的源码，并重命名为 lz4_core.c 匹配 Makefile
+          cp lib/lz4.c ../lz4_core.c
+          cp lib/lz4.h ../lz4.h
           cd ..
           rm -rf lz4_src
           
