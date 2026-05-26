@@ -726,21 +726,17 @@ jobs:
           mkdir -p lz4_mod
           cd lz4_mod
           
-          echo "获取 LZ4 源码库并动态合并 PR #1723 与 #1724..."
+          echo "获取 LZ4 源码库并动态合并 PR #1723..."
           git clone https://github.com/lz4/lz4.git lz4_src
           cd lz4_src
           
-          # 【修复】：配置临时的 Git 身份，满足合并提交的要求
+          # 配置临时的 Git 身份，满足合并提交的要求
           git config user.name "GitHub Action"
           git config user.email "action@github.com"
           
-          # 动态拉取 PR 1723 (AArch64 wildCopy64 优化)
+          # 动态拉取 PR 1723 (AArch64 wildCopy64 杀手级优化)
           git fetch origin pull/1723/head:pr1723
           git merge --no-edit pr1723
-          
-          # 动态拉取 PR 1724 (Stream end 分支预测优化)
-          git fetch origin pull/1724/head:pr1724
-          git merge --no-edit pr1724
           
           # 提取打完补丁的核心源码
           cp lib/lz4.c lib/lz4.h ../
@@ -748,7 +744,6 @@ jobs:
           rm -rf lz4_src
           
           echo "构建微架构级内核优化头文件 (lz4defs.h)..."
-          # PR 1723 已解决 AArch64 拷贝问题，只需保留最基础的对齐与内存宏满足内核环境
           cat << 'EOF' > lz4defs.h
           #ifndef __LZ4DEFS_H__
           #define __LZ4DEFS_H__
@@ -908,7 +903,7 @@ jobs:
           make -C $KSRC O=$KOUT M=$PWD ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 KBUILD_MODPOST_WARN=1 modules
           
           if [ -f my_lz4_mod.ko ]; then
-             echo "=== LZ4 模块编译成功！已完美集成 PR 1723 & 1724 杀手级优化 ==="
+             echo "=== LZ4 模块编译成功！已完美集成 PR 1723 杀手级优化 ==="
              file my_lz4_mod.ko
           else
              echo "ERROR: LZ4 模块编译失败"
