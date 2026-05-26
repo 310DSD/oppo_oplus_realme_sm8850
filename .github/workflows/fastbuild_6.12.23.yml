@@ -738,45 +738,22 @@ jobs:
           git fetch origin pull/1723/head:pr1723
           git merge --no-edit pr1723
           
-          # 【核心修复】：提取打完补丁的源码，并重命名为 lz4_core.c 匹配 Makefile
+          # 提取打完补丁的核心源码，并重命名匹配 Makefile
           cp lib/lz4.c ../lz4_core.c
           cp lib/lz4.h ../lz4.h
           cd ..
           rm -rf lz4_src
           
           echo "构建微架构级内核优化头文件 (lz4defs.h)..."
+          # 【核心精简】：彻底删除冗余的读写宏，完全信任官方源码与 Clang 19 的编译优化
           cat << 'EOF' > lz4defs.h
           #ifndef __LZ4DEFS_H__
           #define __LZ4DEFS_H__
           
           #include <linux/types.h>
           #include <linux/string.h>
-          #include <linux/unaligned.h>
           
-          #define FORCE_INLINE __always_inline
-          typedef uint8_t BYTE;
-          typedef uint16_t U16;
-          typedef uint32_t U32;
-          typedef int32_t S32;
-          typedef uint64_t U64;
-          typedef uintptr_t uptrval;
-          
-          #if defined(CONFIG_64BIT)
-          #define LZ4_ARCH64 1
-          #else
-          #define LZ4_ARCH64 0
-          #endif
-          
-          /* 依然保留基础的读取特化，配合 PR #1723 达到极致性能 */
-          static FORCE_INLINE U16 LZ4_read16(const void *ptr) { return get_unaligned((const U16 *)ptr); }
-          static FORCE_INLINE U32 LZ4_read32(const void *ptr) { return get_unaligned((const U32 *)ptr); }
-          static FORCE_INLINE size_t LZ4_read_ARCH(const void *ptr) { return get_unaligned((const size_t *)ptr); }
-          static FORCE_INLINE void LZ4_write16(void *memPtr, U16 value) { put_unaligned(value, (U16 *)memPtr); }
-          static FORCE_INLINE void LZ4_write32(void *memPtr, U32 value) { put_unaligned(value, (U32 *)memPtr); }
-          static FORCE_INLINE U16 LZ4_readLE16(const void *memPtr) { return get_unaligned_le16(memPtr); }
-          static FORCE_INLINE void LZ4_writeLE16(void *memPtr, U16 value) { return put_unaligned_le16(value, memPtr); }
-          
-          /* 通过 Built-in 满足 FREESTANDING 的严格要求 */
+          /* 通过 Built-in 满足 FREESTANDING 需求，斩断标准库依赖 */
           #define LZ4_memcpy(dst, src, size) __builtin_memcpy(dst, src, size)
           #define LZ4_memmove(dst, src, size) __builtin_memmove(dst, src, size)
           #define LZ4_memset(dst, val, size) __builtin_memset(dst, val, size)
