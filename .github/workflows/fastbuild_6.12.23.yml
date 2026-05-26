@@ -730,6 +730,10 @@ jobs:
           git clone https://github.com/lz4/lz4.git lz4_src
           cd lz4_src
           
+          # 【修复】：配置临时的 Git 身份，满足合并提交的要求
+          git config user.name "GitHub Action"
+          git config user.email "action@github.com"
+          
           # 动态拉取 PR 1723 (AArch64 wildCopy64 优化)
           git fetch origin pull/1723/head:pr1723
           git merge --no-edit pr1723
@@ -910,6 +914,7 @@ jobs:
              echo "ERROR: LZ4 模块编译失败"
              exit 1
           fi
+
 
 
 
